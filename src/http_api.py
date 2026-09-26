@@ -89,6 +89,25 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"records": service.list_records(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/evidence"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"evidence": service.list_evidence(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/loans"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"loans": service.list_loans(item_id, role)})
+                elif path.startswith("/api/evidence/") and path.endswith("/reviews"):
+                    evidence_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"reviews": service.list_reviews(evidence_id, role)})
+                elif path == "/api/custody":
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"board": service.custody_board(role)})
                 elif path.startswith("/api/items/"):
                     item_id = int(path.rsplit("/", 1)[-1])
                     actor, role = self._identity()
@@ -113,6 +132,21 @@ def make_handler(service: Service, static_dir: str):
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/evidence"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.register_evidence(item_id, body, actor, role))
+                elif path.startswith("/api/evidence/") and path.endswith("/checkout"):
+                    evidence_id = int(path.split("/")[3])
+                    self._json(201, service.checkout_evidence(evidence_id, body, actor, role))
+                elif path.startswith("/api/evidence/") and path.endswith("/review"):
+                    evidence_id = int(path.split("/")[3])
+                    self._json(201, service.review_evidence(evidence_id, body, actor, role))
+                elif path.startswith("/api/loans/") and path.endswith("/return"):
+                    loan_id = int(path.split("/")[3])
+                    self._json(200, service.return_loan(loan_id, body, actor, role))
+                elif path.startswith("/api/reviews/") and path.endswith("/correct"):
+                    review_id = int(path.split("/")[3])
+                    self._json(201, service.correct_review(review_id, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/transition"):
                     item_id = int(path.split("/")[3])
                     target = body.get("target")

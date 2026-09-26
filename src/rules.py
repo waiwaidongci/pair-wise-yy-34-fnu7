@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .domain import ConflictError, ValidationError
+from .domain import ConflictError, PermissionDenied, ValidationError
 TITLE='工伤事故调查与纠正措施'; ENTITY='事故'; ID_PREFIX='OI'
 SEVERITIES=['minor', 'moderate', 'serious', 'fatal']; STATES=['reported', 'investigating', 'corrective_action', 'verification', 'closed']; TRANSITIONS={'reported': ['investigating'], 'investigating': ['corrective_action'], 'corrective_action': ['verification'], 'verification': ['closed'], 'closed': []}; TRANSITION_ROLES={'investigating': ['investigator'], 'corrective_action': ['investigator'], 'verification': ['safety_manager'], 'closed': ['safety_manager']}
 CREATE_ROLES=set(['reporter', 'investigator']); RECORD_ROLES=set(['investigator', 'safety_manager']); AUDIT_ROLES=set(['safety_manager', 'viewer']); VIEW_ROLES=set(['reporter', 'investigator', 'safety_manager', 'viewer'])
@@ -20,3 +20,14 @@ def validate_transition(current,target):
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))
+EVIDENCE_STATUSES=['in_custody', 'on_loan', 'pending_review']; EVIDENCE_ENTITY='证据'
+EVIDENCE_ROLES=set(['investigator', 'safety_manager']); LOAN_ROLES=set(['investigator', 'safety_manager']); RETURN_ROLES=set(['investigator', 'safety_manager']); REVIEW_ROLES=set(['safety_manager']); CUSTODY_VIEW_ROLES=VIEW_ROLES
+def validate_checkout(status):
+    if status!='in_custody': raise ConflictError("材料当前不可外借")
+def validate_reviewable(status):
+    if status!='pending_review': raise ConflictError("材料不在待核状态")
+def validate_return_verifier(verifier,borrower):
+    if verifier==borrower: raise PermissionDenied("归还须由借阅人之外的人核对")
+def return_check_result(seal_intact,digest,expected_digest): return 'normal' if seal_intact and digest==expected_digest else 'abnormal'
+def evidence_status_after_return(result): return 'in_custody' if result=='normal' else 'pending_review'
+def custody_blockers(target,open_loans): return ["仍有外借未归还材料"] if target in TERMINAL_STATES and open_loans>0 else []

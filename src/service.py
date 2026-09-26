@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .domain import (ConflictError, ValidationError, ensure_role,
+                     normalize_severity, require_bool, require_number,
+                     require_text)
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
+from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, EVIDENCE_ENTITY,
+                    EVIDENCE_ROLES, LOAN_ROLES, RECORD_ROLES, RETURN_ROLES,
+                    REVIEW_ROLES, TITLE, VIEW_ROLES, completion_blockers,
+                    custody_blockers, escalation_required,
+                    evidence_status_after_return, priority_score,
+                    response_deadline_hours, return_check_result,
+                    role_for_transition, validate_checkout,
+                    validate_return_verifier, validate_reviewable,
                     validate_transition)
 
 
@@ -64,8 +72,8 @@ class Service:
         if not isinstance(expected_version, int) or expected_version < 1:
             raise ValueError("expected_version必须是正整数")
         blockers = completion_blockers(target, self.repository.open_record_count(item_id))
+        blockers += custody_blockers(target, self.repository.open_loan_count(item_id))
         if blockers:
-            from .domain import ConflictError
             raise ConflictError("；".join(blockers))
         updated = self.repository.transition_item(item_id, target, expected_version, actor)
         self.repository.append_audit("transition", ENTITY, item_id, actor, {
@@ -90,6 +98,155 @@ class Service:
     def audit(self, role: str, item_id: Optional[int] = None) -> list:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
+
+    # ---------- 证据保管链 ----------
+
+    def register_evidence(self, item_id: int, payload: Dict[str, Any], actor: str,
+                          role: str) -> Dict[str, Any]:
+        ensure_role(role, EVIDENCE_ROLES)
+        actor = require_text(actor, "actor", 100)
+        evidence_no = require_text(payload.get("evidence_no"), "evidence_no", 100)
+        title = require_text(payload.get("title"), "title", 200)
+        collector = require_text(payload.get("collector"), "collector", 100)
+        seal_no = require_text(payload.get("seal_no"), "seal_no", 100)
+        medium = require_text(payload.get("medium"), "medium", 100)
+        location = require_text(payload.get("location"), "location", 200)
+        digest = require_text(payload.get("digest"), "digest", 128)
+        evidence = self.repository.create_evidence(
+            item_id, evidence_no, title, collector, seal_no, medium, location,
+            digest, actor)
+        self.repository.append_audit("evidence_register", EVIDENCE_ENTITY,
+                                     evidence["id"], actor, {
+                                         "item_id": item_id, "evidence_no": evidence_no,
+                                         "seal_no": seal_no, "medium": medium,
+                                         "collector": collector, "location": location,
+                                     })
+        return evidence
+
+    def checkout_evidence(self, evidence_id: int, payload: Dict[str, Any], actor: str,
+                          role: str) -> Dict[str, Any]:
+        ensure_role(role, LOAN_ROLES)
+        actor = require_text(actor, "actor", 100)
+        borrower = require_text(payload.get("borrower"), "borrower", 100)
+        purpose = require_text(payload.get("purpose"), "purpose", 500)
+        due_at = self._resolve_due(payload)
+        evidence = self.repository.get_evidence(evidence_id)
+        validate_checkout(evidence["status"])
+        loan = self.repository.create_loan(evidence_id, borrower, purpose, due_at, actor)
+        self.repository.append_audit("evidence_checkout", EVIDENCE_ENTITY, evidence_id,
+                                     actor, {"loan_id": loan["id"], "borrower": borrower,
+                                             "purpose": purpose, "due_at": due_at})
+        return loan
+
+    def return_loan(self, loan_id: int, payload: Dict[str, Any], actor: str,
+                    role: str) -> Dict[str, Any]:
+        ensure_role(role, RETURN_ROLES)
+        actor = require_text(actor, "actor", 100)
+        loan = self.repository.get_loan(loan_id)
+        validate_return_verifier(actor, loan["borrower"])
+        seal_intact = require_bool(payload.get("seal_intact"), "seal_intact")
+        digest = require_text(payload.get("digest"), "digest", 128)
+        note = payload.get("note")
+        if note is not None:
+            note = require_text(note, "note", 500)
+        evidence = self.repository.get_evidence(loan["evidence_id"])
+        result = return_check_result(seal_intact, digest, evidence["digest"])
+        updated = self.repository.record_return(
+            loan_id, actor, digest, seal_intact, note,
+            evidence_status_after_return(result))
+        self.repository.append_audit("evidence_return", EVIDENCE_ENTITY, evidence["id"],
+                                     actor, {"loan_id": loan_id, "result": result,
+                                             "seal_intact": seal_intact})
+        updated["result"] = result
+        return updated
+
+    def review_evidence(self, evidence_id: int, payload: Dict[str, Any], actor: str,
+                        role: str) -> Dict[str, Any]:
+        ensure_role(role, REVIEW_ROLES)
+        actor = require_text(actor, "actor", 100)
+        conclusion = require_text(payload.get("conclusion"), "conclusion", 1000)
+        evidence = self.repository.get_evidence(evidence_id)
+        validate_reviewable(evidence["status"])
+        review = self.repository.create_review(evidence_id, conclusion, actor)
+        self.repository.append_audit("evidence_review", EVIDENCE_ENTITY, evidence_id,
+                                     actor, {"review_id": review["id"],
+                                             "conclusion": conclusion})
+        return review
+
+    def correct_review(self, review_id: int, payload: Dict[str, Any], actor: str,
+                       role: str) -> Dict[str, Any]:
+        ensure_role(role, REVIEW_ROLES)
+        actor = require_text(actor, "actor", 100)
+        conclusion = require_text(payload.get("conclusion"), "conclusion", 1000)
+        review = self.repository.correct_review(review_id, conclusion, actor)
+        self.repository.append_audit("review_correct", EVIDENCE_ENTITY,
+                                     review["evidence_id"], actor,
+                                     {"review_id": review["id"], "supersedes": review_id,
+                                      "conclusion": conclusion})
+        return review
+
+    def list_evidence(self, item_id: int, role: str) -> list:
+        self._view(role)
+        return self.repository.list_evidence(item_id)
+
+    def list_loans(self, item_id: int, role: str) -> list:
+        self._view(role)
+        return self.repository.list_loans(item_id)
+
+    def list_reviews(self, evidence_id: int, role: str) -> list:
+        self._view(role)
+        return self.repository.list_reviews(evidence_id)
+
+    def custody_board(self, role: str) -> list:
+        self._view(role)
+        now = datetime.now(timezone.utc)
+        board: Dict[int, Dict[str, Any]] = {}
+
+        def entry(row: Dict[str, Any]) -> Dict[str, Any]:
+            return board.setdefault(row["item_id"], {
+                "item_id": row["item_id"], "title": row["item_title"],
+                "status": row["item_status"], "pending_returns": [],
+                "pending_reviews": []})
+
+        for row in self.repository.pending_returns():
+            entry(row)["pending_returns"].append({
+                "loan_id": row["loan_id"], "evidence_id": row["evidence_id"],
+                "evidence_no": row["evidence_no"], "title": row["evidence_title"],
+                "seal_no": row["seal_no"], "borrower": row["borrower"],
+                "purpose": row["purpose"], "due_at": row["due_at"],
+                "overdue": self._overdue(row["due_at"], now)})
+        for row in self.repository.pending_reviews():
+            entry(row)["pending_reviews"].append({
+                "evidence_id": row["evidence_id"], "evidence_no": row["evidence_no"],
+                "title": row["evidence_title"], "seal_no": row["seal_no"]})
+        return list(board.values())
+
+    @staticmethod
+    def _resolve_due(payload: Dict[str, Any]) -> str:
+        due_at = payload.get("due_at")
+        if due_at is not None:
+            due_at = require_text(due_at, "due_at", 40)
+            try:
+                datetime.fromisoformat(due_at)
+            except ValueError as exc:
+                raise ValidationError("due_at必须是ISO时间") from exc
+            return due_at
+        hours = payload.get("due_in_hours")
+        if hours is None:
+            raise ValidationError("归还时限不能为空")
+        hours = require_number(hours, "due_in_hours", 0.000001)
+        due = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=hours)
+        return due.isoformat()
+
+    @staticmethod
+    def _overdue(due_at: str, now: datetime) -> bool:
+        try:
+            due = datetime.fromisoformat(due_at)
+        except (TypeError, ValueError):
+            return False
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
+        return due < now
 
     @staticmethod
     def enrich(item: Dict[str, Any]) -> Dict[str, Any]:
