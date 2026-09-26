@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 class ErrorKind:
     VALIDATION="validation"; NOT_FOUND="not_found"; FORBIDDEN="forbidden"; CONFLICT="conflict"
@@ -36,3 +37,13 @@ def require_number(value,field,minimum=0.0):
     return number
 def ensure_role(role,allowed):
     if role not in allowed: raise PermissionDenied("当前角色无权执行该操作")
+def require_bool(value,field):
+    if not isinstance(value,bool): raise ValidationError(f"{field}必须是布尔值")
+    return value
+def require_future_time(value,field):
+    value=require_text(value,field,100)
+    try: moment=datetime.fromisoformat(value.replace('Z','+00:00'))
+    except ValueError: raise ValidationError(f"{field}必须是ISO格式时间")
+    if moment.tzinfo is None: moment=moment.replace(tzinfo=timezone.utc)
+    if moment<=datetime.now(timezone.utc): raise ValidationError(f"{field}必须晚于当前时间")
+    return value

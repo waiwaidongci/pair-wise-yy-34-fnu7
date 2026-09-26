@@ -20,3 +20,13 @@ def validate_transition(current,target):
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))
+EVIDENCE_STATES=['stored','on_loan','pending_review']
+EVIDENCE_ROLES=set(['investigator','safety_manager']); LOAN_ROLES=set(['reporter','investigator','safety_manager']); RETURN_ROLES=set(['investigator','safety_manager']); REVIEW_ROLES=set(['safety_manager'])
+def custody_blockers(target,open_loans): return ["仍有外借材料未归还"] if target in TERMINAL_STATES and open_loans>0 else []
+def return_result(seal_intact,digest_match): return 'normal' if seal_intact and digest_match else 'abnormal'
+def evidence_state_after_return(result): return 'stored' if result=='normal' else 'pending_review'
+def is_overdue(due_at,now=None):
+    from datetime import datetime,timezone
+    moment=datetime.fromisoformat(str(due_at).replace('Z','+00:00'))
+    if moment.tzinfo is None: moment=moment.replace(tzinfo=timezone.utc)
+    return moment<(now or datetime.now(timezone.utc))
